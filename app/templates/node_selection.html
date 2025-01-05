@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Node Selection</title>
+    <script>
+        function updateSelection() {
+            const checkboxes = document.querySelectorAll('input[type="checkbox"]:checked');
+            const selectedNodes = Array.from(checkboxes).map(cb => cb.value);
+            fetch('/update', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({NodeIds: selectedNodes}),
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert('Selection updated successfully');
+            })
+            .catch((error) => {
+                console.error('Error:', error);
+                alert('Failed to update selection');
+            });
+        }
+    </script>
+</head>
+<body>
+    <h1>Node Selection</h1>
+    <a href="/"><button>Back to Home</button></a>
+    <form id="nodeSelectionForm">
+        <button type="button" onclick="updateSelection()">Update Selection</button>
+        {% for node in nodes %}
+        <div>
+            <input type="checkbox" id="{{ node.NodeId }}" name="node" value="{{ node.NodeId }}" {% if node.NodeId in selected %}checked{% endif %}>
+            <label for="{{ node.NodeId }}">{{ node.DisplayName }} ({{ node.NodeId }})</label>
+        </div>
+        {% endfor %}
+    </form>
+</body>
+</html>

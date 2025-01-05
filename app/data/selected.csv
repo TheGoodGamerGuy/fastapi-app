@@ -1,0 +1,4 @@
+DisplayName,NodeId,DataType
+DB15.R202_XTT610_Manteltemp,ns=2;s=DB15.R202_XTT610_Manteltemp,Float
+DB15.R201_XTT610_Manteltemp,ns=2;s=DB15.R201_XTT610_Manteltemp,Float
+DB15.F101_XTT610_Manteltemp,ns=2;s=DB15.F101_XTT610_Manteltemp,Float

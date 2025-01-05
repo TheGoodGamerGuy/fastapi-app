@@ -4,11 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OPC UA to MQTT to InfluxDB Converter</title>
-    <style>
-        table { border-collapse: collapse; width: 100%; }
-        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-        th { background-color: #f2f2f2; }
-    </style>
+    <!-- <style>
+        button { margin: 5px; padding: 10px; }
+    </style> -->
     <script>
         async function fetchPost(url, data = {}) {
             const response = await fetch(url, {
@@ -27,32 +25,6 @@
             } catch (error) {
                 console.error('Error:', error);
                 alert('Failed to toggle converter');
-            }
-        }
-
-        async function updateSelection(event) {
-            event.preventDefault();
-            const node_ids = Array.from(event.target.querySelectorAll('input[name="node_ids"]:checked')).map(cb => cb.value);
-            try {
-                const result = await fetchPost('/update', { node_ids });
-                alert(result.message || result.error);
-            } catch (error) {
-                console.error('Error:', error);
-                alert('An error occurred while updating the selection.');
-            }
-        }
-
-        async function addNode(event) {
-            event.preventDefault();
-            const formData = new FormData(event.target);
-            try {
-                const result = await fetch('/add_node', { method: 'POST', body: formData });
-                const data = await result.json();
-                alert(data.message || data.error);
-                if (data.message) location.reload();
-            } catch (error) {
-                console.error('Error:', error);
-                alert('Failed to add node');
             }
         }
 
@@ -77,12 +49,40 @@
                 alert('Failed to toggle converters');
             }
         }
+
+        function importCSV(fileType) {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.csv';
+            input.onchange = async (event) => {
+                const file = event.target.files[0];
+                const formData = new FormData();
+                formData.append('file', file);
+                try {
+                    const response = await fetch(`/import_${fileType}_csv`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    const result = await response.json();
+                    alert(result.message);
+                } catch (error) {
+                    console.error('Error:', error);
+                    alert(`Failed to import ${fileType}.csv`);
+                }
+            };
+            input.click();
+        }
+
+        function exportCSV(fileType) {
+            window.location.href = `/export_${fileType}_csv`;
+        }
     </script>
 </head>
 <body>
     <h1>OPC UA to MQTT to InfluxDB Converter</h1>
+    <a href="/node_selection"><button type="button">Node Selection</button></a>
     <a href="/logs"><button type="button">View Logs</button></a>
-    
+
     <h2>Global Controls</h2>
     <div>
         <label for="read_interval">OPC UA Read Interval (seconds):</label>
@@ -103,36 +103,22 @@
         <button onclick="toggleConverter('mqtt_to_influx')">Toggle MQTT to InfluxDB</button>
     </div>
 
-    <h2>Node Selection</h2>
-    <form method="post" action="/update" onsubmit="updateSelection(event)">
-        <table>
-            <thead>
-                <tr>
-                    <th>Select</th>
-                    <th>Node ID</th>
-                    <th>Description</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for node in nodes %}
-                <tr>
-                    <td><input type="checkbox" name="node_ids" value="{{ node.node_id }}" {% if node.node_id in selected %}checked{% endif %}></td>
-                    <td>{{ node.node_id }}</td>
-                    <td>{{ node.description }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        <button type="submit">Update Selection</button>
-    </form>
-
-    <h2>Add New Node</h2>
-    <form action="/add_node" method="post" onsubmit="addNode(event)">
-        <label for="node_id">Node ID:</label>
-        <input type="text" id="node_id" name="node_id" required><br><br>
-        <label for="description">Description:</label>
-        <input type="text" id="description" name="description" required><br><br>
-        <input type="submit" value="Add Node">
-    </form>
+    <h2>CSV File Management</h2>
+    <div>
+        <h3>all nodes</h3>
+        <form action="/import_nodes_csv" method="post" enctype="multipart/form-data">
+            <input type="file" name="file" accept=".csv">
+            <button type="submit">Import nodes.csv</button>
+        </form>
+        <a href="/export_nodes_csv"><button>Export nodes.csv</button></a>
+    </div>
+    <div>
+        <h3>selected nodes</h3>
+        <form action="/import_selected_csv" method="post" enctype="multipart/form-data">
+            <input type="file" name="file" accept=".csv">
+            <button type="submit">Import selected.csv</button>
+        </form>
+        <a href="/export_selected_csv"><button>Export selected.csv</button></a>
+    </div>
 </body>
 </html>

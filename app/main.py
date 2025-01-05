@@ -1,6 +1,9 @@
 from fastapi import FastAPI, HTTPException, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from fastapi import UploadFile, File
+from fastapi.responses import FileResponse
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import csv
 import os
@@ -10,65 +13,147 @@ import paho.mqtt.client as mqtt
 from datetime import datetime
 from .NodeCsvExporter import NodeCSVExporter  # Import the NodeCSVExporter class
 from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import Response
+import tempfile
+# from fastapi.background import BackgroundTask
+from starlette.background import BackgroundTask
+
+LOG_FILE = "app/logs/application.log"
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = FastAPI()
 templates = Jinja2Templates(directory="app/templates")
 
-DATA_CSV = "app/data.csv"
-SELECTED_CSV = "app/selected.csv"
-NODES_OUTPUT_CSV = "app/nodes_output.csv"  # Path to the output file from NodeCSVExporter
-LOG_FILE = "app/logs/application.log"
+OPCUA_SERVER_URL = "opc.tcp://100.94.111.58:4841"
+
+NODES_CSV = "app/data/nodes.csv"
+SELECTED_CSV = "app/data/selected.csv"
+NODES_OUTPUT_CSV = "app/data/nodes_output.csv"
+
 OPCUA_TO_MQTT_LOG_FILE = "app/logs/opcua_to_mqtt.log"
 MQTT_TO_INFLUX_LOG_FILE = "app/logs/mqtt_to_influx.log"
 OPCUA_TO_MQTT_SCRIPT = "app/opcua_to_MQTT_Converter.py"
 MQTT_TO_INFLUX_SCRIPT = "app/mqtt_to_Influx_Converter.py"
 
-os.makedirs("app/logs", exist_ok=True)
-logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 opcua_to_mqtt_process = None
 mqtt_to_influx_process = None
 
-async def run_node_csv_exporter():
-    exporter = NodeCSVExporter()
-    await exporter.import_nodes()
-    await exporter.export_csv(NODES_OUTPUT_CSV)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logging.debug("Startup event called")  # This should go to the log file
+    # os.makedirs("app/logs", exist_ok=True)
+    # logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    await run_node_csv_exporter()     # UNCOMMENT FOR PRODUCTION
+    create_nodes_csv_from_nodes_output()
+    yield
+    # shutdown event
 
-def create_data_csv_from_nodes_output():
-    with open(NODES_OUTPUT_CSV, mode='r') as input_file, open(DATA_CSV, mode='w', newline='') as output_file:
+app = FastAPI(lifespan=lifespan)
+    
+async def run_node_csv_exporter():
+    server_url = OPCUA_SERVER_URL
+    exporter = NodeCSVExporter(server_url, NODES_OUTPUT_CSV)
+    try:
+        await exporter.import_nodes()
+        await exporter.export_csv()
+    except Exception as e:
+        logging.error(f"Error in node CSV export: {e}")
+    finally:
+        if exporter.client:
+            await exporter.client.disconnect()
+
+def create_nodes_csv_from_nodes_output():
+    with open(NODES_OUTPUT_CSV, mode='r') as input_file, open(NODES_CSV, mode='w', newline='') as output_file:
         reader = csv.DictReader(input_file)
         writer = csv.writer(output_file)
-        writer.writerow(["node_id", "description"])
+        writer.writerow(["DisplayName", "NodeId", "DataType"])
         for row in reader:
-            writer.writerow([row['NodeId'], row['Description']])
+            writer.writerow([row['DisplayName'], row['NodeId'], row['DataType']])
+    logging.info(f"Created {NODES_CSV} from {NODES_OUTPUT_CSV}")
 
+@app.post("/import_nodes_csv")
+async def import_nodes_csv(file: UploadFile = File(...)):
+    try:
+        contents = await file.read()
+        with open(NODES_CSV, "wb") as f:
+            f.write(contents)
+        return {"message": "nodes.csv imported successfully"}
+    except Exception as e:
+        logging.error(f"Error importing nodes.csv: {e}")
+        raise HTTPException(status_code=500, detail="Failed to import nodes.csv")
 
-async def startup_event():
-    await run_node_csv_exporter()
-    create_data_csv_from_nodes_output()
+@app.post("/import_selected_csv")
+async def import_selected_csv(file: UploadFile = File(...)):
+    try:
+        contents = await file.read()
+        with open(SELECTED_CSV, "wb") as f:
+            f.write(contents)
+        if is_process_running(OPCUA_TO_MQTT_SCRIPT):
+            stop_script(OPCUA_TO_MQTT_SCRIPT)
+            await asyncio.sleep(1)
+            await start_script(OPCUA_TO_MQTT_SCRIPT)
+            logging.info("OPC UA to MQTT converter restarted with new node selection")
+        return {"message": "selected.csv imported successfully"}
+    except Exception as e:
+        logging.error(f"Error importing selected.csv: {e}")
+        raise HTTPException(status_code=500, detail="Failed to import selected.csv")
 
-@app.on_event("startup")
-async def startup():
-    await startup_event()
-def ensure_csv(file_path, header):
-    if not os.path.exists(file_path):
-        with open(file_path, mode='w', newline='') as file:
-            csv.writer(file).writerow(header)
-ensure_csv(SELECTED_CSV, ["node_id", "browse_name", "description"])
+@app.get("/export_nodes_csv")
+async def export_nodes_csv():
+    return FileResponse(NODES_CSV, filename="nodes.csv")
 
+@app.get("/export_selected_csv")
+async def export_selected_csv():
+    try:
+        # Ensure we're reading the most recent version of the file
+        with open(SELECTED_CSV, 'r') as file:
+            content = file.read()
+        
+        # Create a temporary file with the current content
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as temp_file:
+            temp_file.write(content)
+            temp_path = temp_file.name
+
+        # Use the temporary file for the response
+        return FileResponse(temp_path, filename="selected.csv", background=BackgroundTask(lambda: os.unlink(temp_path)))
+    except Exception as e:
+        logging.error(f"Error exporting selected.csv: {e}")
+        raise HTTPException(status_code=500, detail="Failed to export selected.csv")
+
+@app.get("/debug_selected_csv")
+async def debug_selected_csv():
+    try:
+        file_path = os.path.abspath(SELECTED_CSV)
+        logging.info(f"Attempting to read file: {file_path}")
+        
+        if not os.path.exists(file_path):
+            logging.error(f"File not found: {file_path}")
+            raise HTTPException(status_code=404, detail="Selected CSV file not found")
+        
+        with open(file_path, 'r') as file:
+            content = file.read()
+        logging.info(f"File content (first 100 chars): {content[:100]}")
+        return {"content": content}
+    except Exception as e:
+        logging.error(f"Error reading selected CSV: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to read selected CSV: {str(e)}")
 
 class Node(BaseModel):
-    node_id: str
+    NodeId: str
     description: str
 
 class UpdateRequest(BaseModel):
-    node_ids: list[str] = []
+    NodeIds: list[str] = []
 
 class IntervalUpdate(BaseModel):
     interval: int
 
 class ConverterToggle(BaseModel):
     turn_on: bool
+
 async def run_script(script_name):
     global opcua_to_mqtt_process, mqtt_to_influx_process
     log_file_path = OPCUA_TO_MQTT_LOG_FILE if script_name == OPCUA_TO_MQTT_SCRIPT else MQTT_TO_INFLUX_LOG_FILE
@@ -105,57 +190,48 @@ def stop_script(script_name):
         return True
     return False
 
-def test_mqtt_connection():
-    try:
-        client = mqtt.Client()
-        client.connect("host.docker.internal", 1883, 60)
-        client.disconnect()
-        return True
-    except Exception as e:
-        logging.error(f"MQTT connection test failed: {e}")
-        return False
-
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     try:
-        with open(DATA_CSV, mode='r') as file:
-            nodes = [row for row in csv.DictReader(file)]
-        with open(SELECTED_CSV, mode='r') as file:
-            selected = {row['node_id'] for row in csv.DictReader(file)}
+        # with open(NODES_CSV, mode='r') as file:
+        #     nodes = [{"NodeId": row['NodeId'], "display_name": row['display_name']} for row in csv.DictReader(file)]
+        # with open(SELECTED_CSV, mode='r') as file:
+        #     selected = {row['NodeId'] for row in csv.DictReader(file)}
+
         opcua_to_mqtt_status = "running" if is_process_running(OPCUA_TO_MQTT_SCRIPT) else "stopped"
         mqtt_to_influx_status = "running" if is_process_running(MQTT_TO_INFLUX_SCRIPT) else "stopped"
     except Exception as e:
         logging.error(f"Error reading CSV files or getting converter status: {e}")
-        nodes, selected = [], set()
+        # nodes, selected = [], set()
         opcua_to_mqtt_status = mqtt_to_influx_status = "unknown"
     return templates.TemplateResponse("index.html", {
         "request": request,
-        "nodes": nodes,
-        "selected": selected,
+        # "nodes": nodes,
+        # "selected": selected,
         "opcua_to_mqtt_status": opcua_to_mqtt_status,
         "mqtt_to_influx_status": mqtt_to_influx_status,
-        "read_interval": os.environ.get('READ_INTERVAL', '5')  # Add this line
+        "read_interval": os.environ.get('READ_INTERVAL', '5')
     })
 
-@app.post("/add_node")
-async def add_node(node_id: str = Form(...), description: str = Form(...)):
-    try:
-        with open(DATA_CSV, mode='a', newline='') as file:
-            csv.writer(file).writerow([node_id, description])
-        logging.info(f"Added new node: {node_id} - {description}")
-        return JSONResponse(content={"message": "Node added successfully", "node": {"node_id": node_id, "description": description}})
-    except Exception as e:
-        logging.error(f"Error adding node: {e}")
-        return JSONResponse(content={"error": "Failed to add node"}, status_code=500)
+# @app.post("/add_node")
+# async def add_node(NodeId: str = Form(...), display_name: str = Form(...)):
+#     try:
+#         with open(NODES_CSV, mode='a', newline='') as file:
+#             csv.writer(file).writerow([NodeId, display_name])
+#         logging.info(f"Added new node: {NodeId} - {display_name}")
+#         return JSONResponse(content={"message": "Node added successfully", "node": {"NodeId": NodeId, "display_name": display_name}})
+#     except Exception as e:
+#         logging.error(f"Error adding node: {e}")
+#         return JSONResponse(content={"error": "Failed to add node"}, status_code=500)
 
 @app.post("/update")
 async def update_selected(request: UpdateRequest):
     try:
-        with open(DATA_CSV, mode='r') as file:
+        with open(NODES_CSV, mode='r') as file:
             all_nodes = [row for row in csv.DictReader(file)]
-        selected_nodes = [node for node in all_nodes if node['node_id'] in request.node_ids]
+        selected_nodes = [node for node in all_nodes if node['NodeId'] in request.NodeIds]
         with open(SELECTED_CSV, mode='w', newline='') as file:
-            writer = csv.DictWriter(file, fieldnames=["node_id", "description"])
+            writer = csv.DictWriter(file, fieldnames=["DisplayName", "NodeId", "DataType"])
             writer.writeheader()
             writer.writerows(selected_nodes)
         if is_process_running(OPCUA_TO_MQTT_SCRIPT):
@@ -163,8 +239,8 @@ async def update_selected(request: UpdateRequest):
             await asyncio.sleep(1)
             await start_script(OPCUA_TO_MQTT_SCRIPT)
             logging.info("OPC UA to MQTT converter restarted with new node selection")
-        logging.info(f"Selection updated. Selected nodes: {', '.join(request.node_ids)}" if request.node_ids else "Selection updated. No nodes selected.")
-        return JSONResponse(content={"message": "Selection updated successfully" if request.node_ids else "All nodes deselected", "selected_nodes": selected_nodes})
+        logging.info(f"Selection updated. Selected nodes: {', '.join(request.NodeIds)}" if request.NodeIds else "Selection updated. No nodes selected.")
+        return JSONResponse(content={"message": "Selection updated successfully" if request.NodeIds else "All nodes deselected", "selected_nodes": selected_nodes})
     except Exception as e:
         logging.error(f"Error updating selection: {e}")
         return JSONResponse(content={"error": "Failed to update selection"}, status_code=500)
@@ -231,7 +307,20 @@ async def get_converter_status():
 
 @app.get("/test_mqtt")
 async def test_mqtt():
-    return {"message": "MQTT connection successful"} if test_mqtt_connection() else JSONResponse(content={"error": "MQTT connection failed"}, status_code=500)
+    try:
+        client = mqtt.Client()
+        client.connect("host.docker.internal", 1883, 60)
+        client.disconnect()
+        connection_status = True
+    except Exception as e:
+        logging.error(f"MQTT connection test failed: {e}")
+        connection_status = False
+    if connection_status:
+        logging.info("MQTT connection successful")
+        return {"message": "MQTT connection successful"}
+    else:
+        logging.error("MQTT connection failed")
+        return JSONResponse(content={"error": "MQTT connection failed"}, status_code=500)
 
 @app.get("/get_latest_logs")
 async def get_latest_logs():
@@ -252,7 +341,9 @@ async def update_read_interval(update: IntervalUpdate):
         stop_script(OPCUA_TO_MQTT_SCRIPT)
         await asyncio.sleep(1)
         await start_script(OPCUA_TO_MQTT_SCRIPT)
+        logging.info(f"Read interval updated to {update.interval} seconds and OPC UA to MQTT converter restarted")
         return {"message": f"Read interval updated to {update.interval} seconds and OPC UA to MQTT converter restarted"}
+    logging.info(f"Read interval updated to {update.interval} seconds")
     return {"message": f"Read interval updated to {update.interval} seconds"}
 
 @app.post("/toggle_both_converters")
@@ -273,4 +364,21 @@ async def toggle_both_converters(toggle: ConverterToggle):
             stop_script(MQTT_TO_INFLUX_SCRIPT)
         message = "Both converters turned off"
 
+    logging.info(message)
     return {"message": message}
+
+@app.get("/node_selection", response_class=HTMLResponse)
+async def node_selection(request: Request):
+    try:
+        with open(NODES_CSV, mode='r') as file:
+            nodes = [row for row in csv.DictReader(file)]
+        with open(SELECTED_CSV, mode='r') as file:
+            selected = {row['NodeId'] for row in csv.DictReader(file)}
+    except Exception as e:
+        logging.error(f"Error reading CSV files: {e}")
+        nodes, selected = [], set()
+    return templates.TemplateResponse("node_selection.html", {
+        "request": request,
+        "nodes": nodes,
+        "selected": selected
+    })
