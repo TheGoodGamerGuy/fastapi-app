@@ -1,8 +1,6 @@
-from fastapi import FastAPI, HTTPException, Request, Form
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request, Form, UploadFile, File
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
 from fastapi.templating import Jinja2Templates
-from fastapi import UploadFile, File
-from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import csv
@@ -11,17 +9,16 @@ import logging
 import asyncio
 import paho.mqtt.client as mqtt
 from datetime import datetime
-from .NodeCsvExporter import NodeCSVExporter  # Import the NodeCSVExporter class
-from pydantic import BaseModel
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response
+from .NodeCsvExporter import NodeCSVExporter
 import tempfile
-# from fastapi.background import BackgroundTask
 from starlette.background import BackgroundTask
 
 LOG_FILE = "app/logs/application.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+node_csv_exporter_running = False
+node_csv_exporter_progress = []
 
 app = FastAPI()
 templates = Jinja2Templates(directory="app/templates")
@@ -41,31 +38,53 @@ MQTT_TO_INFLUX_SCRIPT = "app/mqtt_to_Influx_Converter.py"
 opcua_to_mqtt_process = None
 mqtt_to_influx_process = None
 
-@asynccontextmanager
 async def lifespan(app: FastAPI):
-    logging.debug("Startup event called")  # This should go to the log file
-    # os.makedirs("app/logs", exist_ok=True)
-    # logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    await run_node_csv_exporter()     # UNCOMMENT FOR PRODUCTION
-    create_nodes_csv_from_nodes_output()
+    # Startup
+    logging.debug("Startup event called")
+    asyncio.create_task(background_node_csv_export())
     yield
-    # shutdown event
+    # Shutdown
+    logging.debug("Shutdown event called")
 
 app = FastAPI(lifespan=lifespan)
     
+
+async def background_node_csv_export():
+    global node_csv_exporter_running, node_csv_exporter_progress
+    node_csv_exporter_running = True
+    try:
+        await run_node_csv_exporter()
+        create_nodes_csv_from_nodes_output()
+    finally:
+        node_csv_exporter_running = False
+
 async def run_node_csv_exporter():
+    global node_csv_exporter_progress
     server_url = OPCUA_SERVER_URL
-    exporter = NodeCSVExporter(server_url, NODES_OUTPUT_CSV)
+    
+    def print_callback(message):
+        if node_csv_exporter_progress:
+            node_csv_exporter_progress[-1] = message
+        else:
+            node_csv_exporter_progress.append(message)
+    
+    exporter = NodeCSVExporter(server_url, NODES_OUTPUT_CSV, print_callback=print_callback)
     try:
         await exporter.import_nodes()
         await exporter.export_csv()
     except Exception as e:
         logging.error(f"Error in node CSV export: {e}")
+        node_csv_exporter_progress.append(f"Error: {str(e)}")
     finally:
         if exporter.client:
             await exporter.client.disconnect()
+            node_csv_exporter_progress.append("Disconnected from OPC UA server")
 
 def create_nodes_csv_from_nodes_output():
+    if not os.path.exists(NODES_OUTPUT_CSV):
+        logging.error(f"nodes_output.csv not found at {NODES_OUTPUT_CSV}")
+        return
+
     with open(NODES_OUTPUT_CSV, mode='r') as input_file, open(NODES_CSV, mode='w', newline='') as output_file:
         reader = csv.DictReader(input_file)
         writer = csv.writer(output_file)
@@ -190,24 +209,20 @@ def stop_script(script_name):
         return True
     return False
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def home(request: Request):
+    if node_csv_exporter_running:
+        return RedirectResponse(url="/progress")
+    
     try:
-        # with open(NODES_CSV, mode='r') as file:
-        #     nodes = [{"NodeId": row['NodeId'], "display_name": row['display_name']} for row in csv.DictReader(file)]
-        # with open(SELECTED_CSV, mode='r') as file:
-        #     selected = {row['NodeId'] for row in csv.DictReader(file)}
-
         opcua_to_mqtt_status = "running" if is_process_running(OPCUA_TO_MQTT_SCRIPT) else "stopped"
         mqtt_to_influx_status = "running" if is_process_running(MQTT_TO_INFLUX_SCRIPT) else "stopped"
     except Exception as e:
-        logging.error(f"Error reading CSV files or getting converter status: {e}")
-        # nodes, selected = [], set()
+        logging.error(f"Error getting converter status: {e}")
         opcua_to_mqtt_status = mqtt_to_influx_status = "unknown"
+
     return templates.TemplateResponse("index.html", {
         "request": request,
-        # "nodes": nodes,
-        # "selected": selected,
         "opcua_to_mqtt_status": opcua_to_mqtt_status,
         "mqtt_to_influx_status": mqtt_to_influx_status,
         "read_interval": os.environ.get('READ_INTERVAL', '5')
@@ -382,3 +397,7 @@ async def node_selection(request: Request):
         "nodes": nodes,
         "selected": selected
     })
+
+@app.get("/progress")
+async def progress(request: Request):
+    return templates.TemplateResponse("progress.html", {"request": request, "progress": node_csv_exporter_progress})

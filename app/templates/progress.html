@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Node CSV Export Progress</title>
+    <script>
+        function checkProgress() {
+            fetch('/progress')
+                .then(response => response.text())
+                .then(html => {
+                    document.body.innerHTML = html;
+                    if (!html.includes("Node CSV export completed.")) {
+                        setTimeout(checkProgress, 1000);
+                    } else {
+                        window.location.href = "/";
+                    }
+                });
+        }
+        setTimeout(checkProgress, 1000);
+    </script>
+</head>
+<body>
+    <h1>Node CSV Export Progress</h1>
+    <ul>
+    {% for message in progress %}
+        <li>{{ message }}</li>
+    {% endfor %}
+    </ul>
+</body>
+</html>

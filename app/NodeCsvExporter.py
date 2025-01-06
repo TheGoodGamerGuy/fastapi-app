@@ -1,15 +1,13 @@
 import asyncio
-# import csv
 import logging
 import time
 from asyncio import Queue
 from typing import List
 from asyncua import Client, ua
 import pandas as pd
-# from io import StringIO
 
 class NodeCSVExporter:
-    def __init__(self, server_url: str, output_file: str, namespace_filter: int = 2):
+    def __init__(self, server_url: str, output_file: str, namespace_filter: int = 2, print_callback=None):
         self.server_url = server_url
         self.output_file = output_file
         self.namespace_filter = namespace_filter
@@ -17,6 +15,7 @@ class NodeCSVExporter:
         self.client: Client = None
         self.node_queue: Queue = Queue()
         self.start_time = time.time()
+        self.print_callback = print_callback
 
     async def start_node_browse(self, rootnode):
         await self.node_queue.put(rootnode)
@@ -34,7 +33,7 @@ class NodeCSVExporter:
             self.nodes.extend(batch)
             total_processed += len(batch)
 
-            children_tasks = [node.get_children(refs=33) for node in batch]
+            children_tasks = [node.get_children() for node in batch]
             children_results = await asyncio.gather(*children_tasks)
 
             for children in children_results:
@@ -47,20 +46,44 @@ class NodeCSVExporter:
 
             elapsed_time = time.time() - self.start_time
             nodes_per_second = total_processed / elapsed_time if elapsed_time > 0 else 0
-            print(f"\rNodes browsed: {total_processed}, Queue size: {self.node_queue.qsize()}, "
-                f"Speed: {nodes_per_second:.2f} nodes/s", end="", flush=True)
+            message = f"Nodes browsed: {total_processed}, Queue size: {self.node_queue.qsize()}, Speed: {nodes_per_second:.2f} nodes/s"
+            if self.print_callback:
+                self.print_callback(message)
 
-        print(f"\nTotal nodes browsed: {total_processed}")
+        final_message = f"Total nodes browsed: {total_processed}"
+        if self.print_callback:
+            self.print_callback(final_message)
         self.nodes = list(processed_nodes)
+
+    async def node_to_csv(self, node):
+        try:
+            browse_name = await node.read_browse_name()
+            display_name = await node.read_display_name()
+            node_class = await node.read_node_class()
+            description = await node.read_description()
+            data_type = None
+            if node_class == ua.NodeClass.Variable:
+                data_type = await node.read_data_type()
+                data_type = str(data_type)
+            parent = await node.get_parent()
+            parent_id = parent.nodeid.to_string() if parent else None
+            return [
+                node.nodeid.to_string(),
+                browse_name.to_string(),
+                parent_id,
+                data_type,
+                display_name.Text,
+                description.Text if description else None
+            ]
+        except Exception as e:
+            logging.error(f"Error processing node {node.nodeid}: {e}")
+            return None
 
     async def export_csv(self):
         all_nodes = self.nodes
-        print(f"Total nodes: {len(all_nodes)}")
         nodes = [node for node in all_nodes if node.nodeid.NamespaceIndex == self.namespace_filter]
         total_nodes = len(nodes)
         filtered_out = len(all_nodes) - total_nodes
-        print(f"Nodes after filtering: {total_nodes}")
-        print(f"Nodes filtered by namespace: {filtered_out}")
 
         async def process_node(node):
             try:
@@ -83,57 +106,25 @@ class NodeCSVExporter:
             elapsed_time = time.time() - start_time
             nodes_per_second = processed / elapsed_time if elapsed_time > 0 else 0
             
-            print(f"\rNodes exported: {processed}/{total_nodes}, "
-                  f"Speed: {nodes_per_second:.2f} nodes/s", end="", flush=True)
+            message = f"Nodes exported: {processed}/{total_nodes}, Speed: {nodes_per_second:.2f} nodes/s"
+            if self.print_callback:
+                self.print_callback(message)
 
-        print("\nCreating DataFrame...")
         df = pd.DataFrame(data, columns=["NodeId", "BrowseName", "ParentNodeId", "DataType", "DisplayName", "Description"])
-        
-        print("Writing to CSV...")
         df.to_csv(self.output_file, index=False)
 
-        print(f"\nExport completed.")
-        print(f"Total nodes: {len(all_nodes)}")
-        print(f"Nodes filtered by namespace: {filtered_out}")
-        print(f"Nodes exported: {total_nodes}")
-
-
-
-    async def node_to_csv(self, node):
-        nodeid = node.nodeid.to_string()
-        attributes = await node.read_attributes([
-            ua.AttributeIds.BrowseName,
-            ua.AttributeIds.DataType,
-            ua.AttributeIds.DisplayName,
-            ua.AttributeIds.Description
-        ])
-        
-        browsename = attributes[0].Value.Value.Name if attributes[0].StatusCode.is_good() else "N/A"
-        datatype_node = attributes[1].Value.Value if attributes[1].StatusCode.is_good() else None
-        displayname = attributes[2].Value.Value.Text if attributes[2].StatusCode.is_good() else "N/A"
-        description = attributes[3].Value.Value.Text if attributes[3].StatusCode.is_good() else "N/A"
-
-        parent = await node.get_parent()
-        parent_nodeid = parent.nodeid.to_string() if parent else "N/A"
-
-        # Get the actual datatype name
-        if datatype_node:
-            try:
-                datatype_node = self.client.get_node(datatype_node)
-                datatype = await datatype_node.read_browse_name()
-                datatype = datatype.Name
-            except Exception:
-                datatype = str(datatype_node)
-        else:
-            datatype = "N/A"
-
-        return [nodeid, browsename, parent_nodeid, datatype, displayname, description]
+        final_message = f"Export completed. Total nodes: {len(all_nodes)}, Filtered out: {filtered_out}, Exported: {total_nodes}"
+        if self.print_callback:
+            self.print_callback(final_message)
 
     async def import_nodes(self):
         self.client = Client(self.server_url)
         await self.client.connect()
-        print("Connected to OPC UA server")
-        print("Browsing nodes...")
+        message = "Connected to OPC UA server\nBrowsing nodes..."
+        if self.print_callback:
+            self.print_callback(message)
+        else:
+            print(message)
         root = self.client.get_root_node()
         await self.start_node_browse(root)
 
