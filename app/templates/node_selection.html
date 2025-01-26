@@ -4,6 +4,20 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Node Selection</title>
+    <style>
+        table {
+            border-collapse: collapse;
+            width: 100%;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+    </style>
     <script>
         function updateSelection() {
             const checkboxes = document.querySelectorAll('input[type="checkbox"]:checked');
@@ -31,12 +45,28 @@
     <a href="/"><button>Back to Home</button></a>
     <form id="nodeSelectionForm">
         <button type="button" onclick="updateSelection()">Update Selection</button>
-        {% for node in nodes %}
-        <div>
-            <input type="checkbox" id="{{ node.NodeId }}" name="node" value="{{ node.NodeId }}" {% if node.NodeId in selected %}checked{% endif %}>
-            <label for="{{ node.NodeId }}">{{ node.DisplayName }} ({{ node.NodeId }})</label>
-        </div>
-        {% endfor %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Select</th>
+                    <th>Node ID</th>
+                    <th>Display Name</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for node in nodes %}
+                <tr>
+                    <td>
+                        <input type="checkbox" id="{{ node.NodeId }}" name="node" value="{{ node.NodeId }}" {% if node.NodeId in selected %}checked{% endif %}>
+                    </td>
+                    <td>
+                        <label for="{{ node.NodeId }}">{{ node.DisplayName }}</label>
+                    </td>
+                    <td>{{ node.NodeId }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
     </form>
 </body>
 </html>
