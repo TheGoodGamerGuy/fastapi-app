@@ -1,5 +1,5 @@
 git clone https://github.com/TheGoodGamerGuy/dataforgetest.git
-cd dataforgetest/
+cd fastapi-api/
 docker-compose up --build -d
 
 
