@@ -1,18 +1,257 @@
-git clone https://github.com/TheGoodGamerGuy/dataforgetest.git
-cd fastapi-api/
-docker-compose up --build -d
 
+# FastAPI OPC UA/MQTT Management API Documentation
 
-# ssh tunnel
-ssh -i <ssh-key> root@<droplet-ip> -L 8081:localhost:8080 -N
-# redirects localhost:8081 to <droplet-ip>:8080 without port forwarding
+This document outlines the available HTTP endpoints for the FastAPI application designed to manage OPC UA node interactions, data conversion scripts (OPC UA to MQTT, MQTT to InfluxDB), and associated configurations/logs.
 
+**Base URL:** (Assuming the application runs locally on port 8000) `http://localhost:8000`
 
-# builds the project
-docker-compose build 
+---
 
-# removes existing container
-docker-compose down
+## Table of Contents
 
-# launches new container
-docker-compose up -d
+1.  [HTML User Interface Endpoints](#html-user-interface-endpoints)
+2.  [Data Management Endpoints (CSV Files)](#data-management-endpoints-csv-files)
+3.  [Script Control Endpoints](#script-control-endpoints)
+4.  [Logging Endpoints](#logging-endpoints)
+5.  [Configuration Endpoints](#configuration-endpoints)
+6.  [Status & Debugging Endpoints](#status--debugging-endpoints)
+
+---
+
+## HTML User Interface Endpoints
+
+These endpoints primarily serve HTML pages for user interaction.
+
+### `GET /`
+
+*   **Description:** Renders the main dashboard (`index.html`). Displays the status of the converter scripts and the current read interval. Redirects to `/progress` if the background node CSV export task is running.
+*   **Request:** None
+*   **Response:**
+    *   `200 OK`: `text/html` - The rendered `index.html` page.
+    *   `307 Temporary Redirect`: Redirects to `/progress` if node export is in progress.
+
+### `GET /logs`
+
+*   **Description:** Renders the logs page (`logs.html`), displaying the contents of the application log, OPC UA to MQTT converter log, and MQTT to InfluxDB converter log.
+*   **Request:** None
+*   **Response:**
+    *   `200 OK`: `text/html` - The rendered `logs.html` page containing log data.
+
+### `GET /node_selection`
+
+*   **Description:** Renders the node selection interface (`node_selection.html`). Displays all available nodes from `nodes.csv` and indicates which ones are currently selected based on `selected.csv`.
+*   **Request:** None
+*   **Response:**
+    *   `200 OK`: `text/html` - The rendered `node_selection.html` page.
+    *   `500 Internal Server Error`: If there's an error reading the CSV files.
+
+### `GET /progress`
+
+*   **Description:** Renders the progress page (`progress.html`) which displays status messages from the background node CSV export task. Intended for use when the export is initiated (currently commented out in `lifespan`).
+*   **Request:** None
+*   **Response:**
+    *   `200 OK`: `text/html` - The rendered `progress.html` page showing export progress messages.
+
+---
+
+## Data Management Endpoints (CSV Files)
+
+Endpoints for importing, exporting, and updating node data via CSV files.
+
+### `POST /import_nodes_csv`
+
+*   **Description:** Uploads and replaces the `nodes.csv` file, which contains the list of all discoverable OPC UA nodes.
+*   **Request:**
+    *   `Content-Type: multipart/form-data`
+    *   **Form Field:** `file` (The `.csv` file to upload)
+*   **Response:**
+    *   `200 OK`: `application/json` - `{"message": "nodes.csv imported successfully"}`
+    *   `500 Internal Server Error`: `application/json` - `{"detail": "Failed to import nodes.csv"}`
+
+### `POST /import_selected_csv`
+
+*   **Description:** Uploads and replaces the `selected.csv` file, which contains the list of OPC UA nodes to be monitored and forwarded to MQTT. Restarts the OPC UA to MQTT converter script if it's running to apply the changes.
+*   **Request:**
+    *   `Content-Type: multipart/form-data`
+    *   **Form Field:** `file` (The `.csv` file to upload)
+*   **Response:**
+    *   `200 OK`: `application/json` - `{"message": "selected.csv imported successfully"}`
+    *   `500 Internal Server Error`: `application/json` - `{"detail": "Failed to import selected.csv"}`
+
+### `GET /export_nodes_csv`
+
+*   **Description:** Downloads the current `nodes.csv` file.
+*   **Request:** None
+*   **Response:**
+    *   `200 OK`: `text/csv` - The contents of `app/data/nodes.csv` as an attachment named `nodes.csv`.
+    *   `404 Not Found`: If `nodes.csv` does not exist.
+
+### `GET /export_selected_csv`
+
+*   **Description:** Downloads the current `selected.csv` file. Uses a temporary file to ensure the latest content is served.
+*   **Request:** None
+*   **Response:**
+    *   `200 OK`: `text/csv` - The contents of `app/data/selected.csv` as an attachment named `selected.csv`.
+    *   `404 Not Found`: If `selected.csv` does not exist.
+    *   `500 Internal Server Error`: `application/json` - `{"detail": "Failed to export selected.csv"}`
+
+### `POST /update`
+
+*   **Description:** Updates the `selected.csv` file based on a provided list of NodeIds. Reads available nodes from `nodes.csv`, filters them based on the input `NodeIds`, and writes the result to `selected.csv`. Restarts the OPC UA to MQTT converter script if it's running.
+*   **Request:**
+    *   `Content-Type: application/json`
+    *   **Body:** JSON object conforming to the `UpdateRequest` model:
+        ```json
+        {
+          "NodeIds": ["ns=...;s=...", "ns=...;i=..."]
+        }
+        ```
+        (An empty list `[]` will clear the selection).
+*   **Response:**
+    *   `200 OK`: `application/json` - Confirmation message and the list of selected nodes. Example:
+        ```json
+        {
+          "message": "Selection updated successfully",
+          "selected_nodes": [
+            {"DisplayName": "NodeName1", "NodeId": "ns=...;s=...", "DataType": "Double"},
+            {"DisplayName": "NodeName2", "NodeId": "ns=...;i=...", "DataType": "Int32"}
+          ]
+        }
+        ```
+        or
+        ```json
+        {
+          "message": "All nodes deselected",
+          "selected_nodes": []
+        }
+        ```
+    *   `500 Internal Server Error`: `application/json` - `{"error": "Failed to update selection"}`
+
+---
+
+## Script Control Endpoints
+
+Endpoints for starting and stopping the background data converter scripts.
+
+### `POST /toggle_opcua_to_mqtt`
+
+*   **Description:** Starts the `opcua_to_MQTT_Converter.py` script if it's stopped, or stops it if it's running.
+*   **Request:** None
+*   **Response:**
+    *   `200 OK`: `application/json` - `{"message": "OPC UA to MQTT converter started"}` or `{"message": "OPC UA to MQTT converter stopped"}`
+    *   `500 Internal Server Error`: `application/json` - `{"error": "Failed to start converter"}` or `{"error": "Failed to stop converter"}`
+
+### `POST /toggle_mqtt_to_influx`
+
+*   **Description:** Starts the `mqtt_to_Influx_Converter.py` script if it's stopped, or stops it if it's running.
+*   **Request:** None
+*   **Response:**
+    *   `200 OK`: `application/json` - `{"message": "MQTT to InfluxDB converter started"}` or `{"message": "MQTT to InfluxDB converter stopped"}`
+    *   `500 Internal Server Error`: `application/json` - `{"error": "Failed to start converter"}` or `{"error": "Failed to stop converter"}`
+
+### `POST /toggle_both_converters`
+
+*   **Description:** Starts or stops *both* the OPC UA to MQTT and MQTT to InfluxDB converter scripts simultaneously based on the provided flag.
+*   **Request:**
+    *   `Content-Type: application/json`
+    *   **Body:** JSON object conforming to the `ConverterToggle` model:
+        ```json
+        {
+          "turn_on": true
+        }
+        ```
+        or
+        ```json
+        {
+          "turn_on": false
+        }
+        ```
+*   **Response:**
+    *   `200 OK`: `application/json` - `{"message": "Both converters turned on"}` or `{"message": "Both converters turned off"}`
+
+---
+
+## Logging Endpoints
+
+Endpoints for viewing and managing log files.
+
+### `GET /get_latest_logs`
+
+*   **Description:** Retrieves the last 100 lines (in reverse chronological order) from each of the main log files (Application, OPC->MQTT, MQTT->Influx).
+*   **Request:** None
+*   **Response:**
+    *   `200 OK`: `application/json` - A JSON object where keys are log file identifiers and values are arrays of log lines. Example:
+        ```json
+        {
+          "Application": ["Log line N", "Log line N-1", ...],
+          "opcua_to_MQTT_Converter.py": ["Log line M", "Log line M-1", ...],
+          "mqtt_to_Influx_Converter.py": ["Log line K", "Log line K-1", ...]
+        }
+        ```
+
+### `POST /clear_logs`
+
+*   **Description:** Clears the contents of all log files (`application.log`, `opcua_to_mqtt.log`, `mqtt_to_influx.log`).
+*   **Request:** None
+*   **Response:**
+    *   `200 OK`: `application/json` - `{"message": "All logs cleared successfully"}`
+    *   `500 Internal Server Error`: `application/json` - `{"detail": "Failed to clear logs"}`
+
+---
+
+## Configuration Endpoints
+
+Endpoints for modifying application settings.
+
+### `POST /update_read_interval`
+
+*   **Description:** Updates the OPC UA node read interval (used by `opcua_to_MQTT_Converter.py`). Sets the `READ_INTERVAL` environment variable. Restarts the OPC UA to MQTT converter script if it's running to apply the change.
+*   **Request:**
+    *   `Content-Type: application/json`
+    *   **Body:** JSON object conforming to the `IntervalUpdate` model:
+        ```json
+        {
+          "interval": 10
+        }
+        ```
+        (Interval in seconds)
+*   **Response:**
+    *   `200 OK`: `application/json` - Confirmation message indicating the update and potential restart. Example: `{"message": "Read interval updated to 10 seconds and OPC UA to MQTT converter restarted"}` or `{"message": "Read interval updated to 10 seconds"}`
+
+---
+
+## Status & Debugging Endpoints
+
+Endpoints for checking system status and debugging.
+
+### `GET /converter_status`
+
+*   **Description:** Returns the current running status ("running" or "stopped") of both converter scripts.
+*   **Request:** None
+*   **Response:**
+    *   `200 OK`: `application/json` - Example:
+        ```json
+        {
+          "opcua_to_mqtt": "running",
+          "mqtt_to_influx": "stopped"
+        }
+        ```
+
+### `GET /test_mqtt`
+
+*   **Description:** Attempts a simple connection test to the configured MQTT broker (`host.docker.internal:1883`).
+*   **Request:** None
+*   **Response:**
+    *   `200 OK`: `application/json` - `{"message": "MQTT connection successful"}`
+    *   `500 Internal Server Error`: `application/json` - `{"error": "MQTT connection failed"}`
+
+### `GET /debug_selected_csv`
+
+*   **Description:** Reads and returns the entire content of the `selected.csv` file as a JSON string. Useful for debugging file access issues.
+*   **Request:** None
+*   **Response:**
+    *   `200 OK`: `application/json` - `{"content": "<content of selected.csv>"}`
+    *   `404 Not Found`: `application/json` - `{"detail": "Selected CSV file not found"}`
+    *   `500 Internal Server Error`: `application/json` - `{"detail": "Failed to read selected CSV: <error message>"}`
+
+---
