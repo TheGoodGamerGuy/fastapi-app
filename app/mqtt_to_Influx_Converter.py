@@ -7,10 +7,11 @@ MQTT_BROKER = "host.docker.internal"
 MQTT_PORT = 1883
 MQTT_TOPIC = "plant1/#"
 INFLUXDB_URL = "host.docker.internal:8086"
-INFLUXDB_ORG = "PP_Test"
-INFLUXDB_BUCKET = "sensor_data"
+INFLUXDB_ORG = "DataForge"
+INFLUXDB_BUCKET = "mqtt"
+INFLUXDB_TOKEN = "changeme"
 
-influx_client = InfluxDBClient(url=INFLUXDB_URL, org=INFLUXDB_ORG)
+influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 write_api = influx_client.write_api(write_options=SYNCHRONOUS)
 
 def on_connect(client, userdata, flags, rc):
@@ -29,13 +30,26 @@ def on_message(client, userdata, msg):
     except Exception as e:
         print(f"Error processing message: {e}")
 
-mqtt_client = mqtt.Client()
-mqtt_client.on_connect = on_connect
-mqtt_client.on_message = on_message
+def connect_mqtt():
+    client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_message = on_message
+    try:
+        client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+        print("MQTT client connection initiated")
+        return client
+    except Exception as e:
+        print(f"Failed to connect to MQTT broker: {e}")
+        return None
 
+# Main execution
 try:
     print("Connecting to MQTT Broker...")
-    mqtt_client.connect(MQTT_BROKER, MQTT_PORT)
-    mqtt_client.loop_forever()
+    mqtt_client = connect_mqtt()
+    if mqtt_client:
+        # Start the loop only if connection was successful
+        mqtt_client.loop_forever()
+    else:
+        print("Failed to establish MQTT connection")
 except Exception as e:
-    print(f"Error: {e}")
+    print(f"Error in main execution: {e}")
