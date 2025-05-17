@@ -2,6 +2,7 @@ import json
 import paho.mqtt.client as mqtt
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
+import os
 
 MQTT_BROKER = "host.docker.internal"
 MQTT_PORT = 1883
@@ -9,7 +10,7 @@ MQTT_TOPIC = "plant1/#"
 INFLUXDB_URL = "host.docker.internal:8086"
 INFLUXDB_ORG = "DataForge"
 INFLUXDB_BUCKET = "mqtt"
-INFLUXDB_TOKEN = "changeme"
+INFLUXDB_TOKEN = os.environ.get('INFLUX_TOKEN')
 
 influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 write_api = influx_client.write_api(write_options=SYNCHRONOUS)
